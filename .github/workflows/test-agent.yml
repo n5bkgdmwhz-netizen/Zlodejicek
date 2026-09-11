@@ -1,4 +1,4 @@
-name: Zlodeji agent - pending recovery
+name: Zlodeji agent - single auction write test
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  recovery:
+  write-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,11 +19,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run pending recovery
+      - name: Run single auction write test
         env:
           ROOM_CODE: ${{ secrets.ROOM_CODE }}
           TOKEN: ${{ secrets.TOKEN }}
-          PENDING_REQUEST_ID: ${{ secrets.PENDING_REQUEST_ID }}
-          PENDING_AUCTION_ID: ${{ secrets.PENDING_AUCTION_ID }}
-          PENDING_AMOUNT: ${{ secrets.PENDING_AMOUNT }}
+          TARGET_AUCTION_ID: "a20-0"
+          TEST_BID_AMOUNT: "20"
         run: python agent.py
