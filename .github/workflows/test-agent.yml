@@ -1,0 +1,28 @@
+name: Zlodeji agent - test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run read-only API test
+        env:
+          ROOM_CODE: ${{ secrets.ROOM_CODE }}
+          TOKEN: ${{ secrets.TOKEN }}
+        run: python agent.py
