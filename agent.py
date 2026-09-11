@@ -11,18 +11,20 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
 
-# Bezpečnostní režim.
-# True = agent pouze vypisuje plán.
-# False = agent může podle další logiky odesílat akce.
-DRY_RUN = True
+# True = pouze vypíše plán.
+# False = může odeslat skutečný příhoz.
+DRY_RUN = False
 
-# Maximální částky, které smí agent nabídnout podle tieru aukce.
-# Tyto hodnoty si později upravíš.
 MAX_BID_BY_TIER = {
     0: 60,
     1: 120,
     2: 200,
 }
+
+# Pokud je True, agent z bezpečnostních důvodů automaticky
+# neodešle příhoz, pokud aukce zavírá za více než tuto dobu.
+# Pro jednorázový test nastavujeme None.
+TEST_ONLY_AUCTION_ID = "a19-5"
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -99,7 +101,7 @@ def format_time(timestamp):
     ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def current_auction_plan(state: dict) -> list[dict]:
+def current_open_auctions(state: dict) -> list[dict]:
     round_number = state.get("round")
     auctions = state.get("auctions", [])
 
@@ -115,111 +117,146 @@ def current_auction_plan(state: dict) -> list[dict]:
     ]
 
 
-def print_round_info(state: dict) -> None:
-    round_number = state.get("round")
-    server_time = state.get("serverTime")
-    deadlines = state.get("deadlines", [])
-
-    print()
-    print("===== ČAS KOLA =====")
-    print(f"Aktuální kolo: {round_number}")
-    print(f"Serverový čas: {server_time}")
-    print(f"Serverový čas čitelně: {format_time(server_time)}")
-
-    if (
-        isinstance(round_number, int)
-        and isinstance(deadlines, list)
-        and 0 <= round_number < len(deadlines)
-    ):
-        deadline = deadlines[round_number]
-
-        print(f"Uzávěrka kola: {deadline}")
-        print(f"Uzávěrka kola čitelně: {format_time(deadline)}")
-
-        if isinstance(server_time, (int, float)):
-            seconds_left = max(0, (deadline - server_time) / 1000)
-
-            print(f"Zbývá sekund: {seconds_left:.0f}")
-            print(f"Zbývá minut: {seconds_left / 60:.1f}")
-
-            if seconds_left <= 60:
-                print("REŽIM: poslední minuta před uzávěrkou kola.")
-            else:
-                print("REŽIM: nejsme v poslední minutě před uzávěrkou kola.")
-    else:
-        print("Uzávěrku aktuálního kola se nepodařilo určit.")
-
-
-def print_auction_plan(state: dict) -> None:
-    server_time = state.get("serverTime")
-    auctions = current_auction_plan(state)
-
-    print()
-    print("===== PLÁN AUKCÍ - DRY RUN =====")
-
-    if not auctions:
-        print("V aktuálním kole nejsou otevřené aukce.")
-        return
+def choose_bid(state: dict) -> dict | None:
+    auctions = current_open_auctions(state)
 
     for auction in auctions:
         auction_id = auction.get("id")
+
+        if (
+            TEST_ONLY_AUCTION_ID is not None
+            and auction_id != TEST_ONLY_AUCTION_ID
+        ):
+            continue
+
         tier = auction.get("tier")
-        current_bid = auction.get("bid")
         minimum_bid = auction.get("minBid")
         bidder = auction.get("bidder")
-        closes_at = auction.get("closesAt")
-        hard_close = auction.get("hardClose")
 
         max_bid = MAX_BID_BY_TIER.get(tier)
 
-        print()
-        print(f"Aukce: {auction_id}")
-        print(f"  Název: {auction.get('name')}")
-        print(f"  Tier: {tier}")
-        print(f"  Aktuální nabídka: {current_bid}")
-        print(f"  Minimální další příhoz: {minimum_bid}")
-        print(f"  Aktuální vedoucí: {bidder}")
-        print(f"  Uzavírá se: {format_time(closes_at)}")
-        print(f"  Tvrdá uzávěrka: {format_time(hard_close)}")
-        print(f"  Můj maximální limit: {max_bid}")
-
-        if isinstance(server_time, (int, float)) and isinstance(
-            closes_at,
-            (int, float),
-        ):
-            seconds_to_close = max(0, (closes_at - server_time) / 1000)
-            print(f"  Do uzavření aukce zbývá: {seconds_to_close:.0f} sekund")
-
         if max_bid is None:
-            print("  ROZHODNUTÍ: tier nemá nastavený limit.")
+            print(f"Aukce {auction_id}: tier nemá nastavený limit.")
             continue
 
         if not isinstance(minimum_bid, int):
-            print("  ROZHODNUTÍ: nelze určit minimální příhoz.")
+            print(f"Aukce {auction_id}: chybí platný minBid.")
             continue
 
-        if minimum_bid <= max_bid:
-            print(
-                f"  ROZHODNUTÍ: hypoteticky přihodit {minimum_bid} zl."
+        if bidder is None:
+            raise RuntimeError(
+                f"Aukce {auction_id} nemá bidder. "
+                "Před ostrým příhozem ověř payload ve webu."
             )
-        else:
+
+        if minimum_bid > max_bid:
             print(
-                "  ROZHODNUTÍ: nepřihazovat, "
-                f"minimum {minimum_bid} > limit {max_bid}."
+                f"Aukce {auction_id}: nepřihazovat, "
+                f"{minimum_bid} > limit {max_bid}."
             )
+            continue
+
+        return {
+            "id": auction_id,
+            "amount": minimum_bid,
+            "tier": tier,
+            "current_bid": auction.get("bid"),
+            "bidder": bidder,
+            "max_bid": max_bid,
+        }
+
+    return None
+
+
+def send_bid(auction_id: str, amount: int) -> dict:
+    payload = {
+        "code": ROOM_CODE,
+        "token": TOKEN,
+        "action": {
+            "type": "auction-bid",
+            "id": auction_id,
+            "amount": amount,
+        },
+    }
+
+    print()
+    print("===== ODESÍLÁNÍ PŘÍHOZU =====")
+    print(f"Aukce: {auction_id}")
+    print(f"Částka: {amount}")
+    print("Akce: auction-bid")
+
+    return post_json("/api/act", payload)
+
+
+def verify_bid(state: dict, auction_id: str, amount: int) -> None:
+    auctions = state.get("auctions", [])
+
+    auction = next(
+        (
+            item
+            for item in auctions
+            if isinstance(item, dict)
+            and item.get("id") == auction_id
+        ),
+        None,
+    )
+
+    print()
+    print("===== OVĚŘENÍ PŘÍHOZU =====")
+
+    if auction is None:
+        print("Aukce po odeslání nebyla ve stavu nalezena.")
+        return
+
+    print(f"Stav aukce: {auction.get('status')}")
+    print(f"Aktuální nabídka po akci: {auction.get('bid')}")
+    print(f"Vedoucí po akci: {auction.get('bidder')}")
+    print(f"Odeslaná částka: {amount}")
 
 
 def main() -> None:
     print(f"Testing room: {ROOM_CODE}")
+    print(f"DRY_RUN={DRY_RUN}")
+    print(f"TEST_ONLY_AUCTION_ID={TEST_ONLY_AUCTION_ID}")
 
-    state = get_state()
+    state_before = get_state()
+    selected_bid = choose_bid(state_before)
 
-    print_round_info(state)
-    print_auction_plan(state)
+    if selected_bid is None:
+        print()
+        print("Nebyla nalezena aukce splňující podmínky.")
+        return
 
     print()
-    print(f"DRY_RUN={DRY_RUN}")
-    print("Nebyla odeslána žádná herní akce.")
+    print("===== VYBRANÝ PŘÍHOZ =====")
+    print(f"Aukce: {selected_bid['id']}")
+    print(f"Tier: {selected_bid['tier']}")
+    print(f"Aktuální nabídka: {selected_bid['current_bid']}")
+    print(f"Minimální příhoz: {selected_bid['amount']}")
+    print(f"Maximální limit: {selected_bid['max_bid']}")
+    print(f"Současný vedoucí: {selected_bid['bidder']}")
+
+    if DRY_RUN:
+        print()
+        print("DRY_RUN=True – příhoz nebyl odeslán.")
+        return
+
+    result = send_bid(
+        auction_id=selected_bid["id"],
+        amount=selected_bid["amount"],
+    )
+
+    print()
+    print("Odpověď akce:")
+    print(json.dumps(result, ensure_ascii=False, indent=2)[:4000])
+
+    state_after = get_state()
+
+    verify_bid(
+        state=state_after,
+        auction_id=selected_bid["id"],
+        amount=selected_bid["amount"],
+    )
 
 
 if __name__ == "__main__":
