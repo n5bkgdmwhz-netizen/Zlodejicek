@@ -11,9 +11,18 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
 
-# Pouze diagnostická hodnota.
-# Agent zatím nic neposílá.
+# Bezpečnostní režim.
+# True = agent pouze vypisuje plán.
+# False = agent může podle další logiky odesílat akce.
 DRY_RUN = True
+
+# Maximální částky, které smí agent nabídnout podle tieru aukce.
+# Tyto hodnoty si později upravíš.
+MAX_BID_BY_TIER = {
+    0: 60,
+    1: 120,
+    2: 200,
+}
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -90,69 +99,14 @@ def format_time(timestamp):
     ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def get_current_deadline(state: dict):
-    deadlines = state.get("deadlines")
-    round_number = state.get("round")
-
-    if not isinstance(deadlines, list):
-        return None
-
-    if not isinstance(round_number, int):
-        return None
-
-    deadline_index = round_number
-
-    if deadline_index >= len(deadlines):
-        return None
-
-    deadline = deadlines[deadline_index]
-
-    if not isinstance(deadline, (int, float)):
-        return None
-
-    return deadline
-
-
-def print_round_info(state: dict) -> None:
-    round_number = state.get("round")
-    server_time = state.get("serverTime")
-    deadline = get_current_deadline(state)
-
-    print()
-    print("===== ČAS KOLA =====")
-    print(f"Aktuální kolo: {round_number}")
-    print(f"Serverový čas: {server_time}")
-    print(f"Serverový čas čitelně: {format_time(server_time)}")
-    print(f"Uzávěrka: {deadline}")
-    print(f"Uzávěrka čitelně: {format_time(deadline)}")
-
-    if isinstance(server_time, (int, float)) and isinstance(
-        deadline,
-        (int, float),
-    ):
-        seconds_left = max(0, (deadline - server_time) / 1000)
-
-        print(f"Zbývá sekund: {seconds_left:.0f}")
-        print(f"Zbývá minut: {seconds_left / 60:.1f}")
-
-        if seconds_left <= 60:
-            print("REŽIM: jsme v poslední minutě před uzávěrkou.")
-        else:
-            print("REŽIM: ještě nejsme v poslední minutě.")
-
-
-def print_auction_plan(state: dict) -> None:
+def current_auction_plan(state: dict) -> list[dict]:
     round_number = state.get("round")
     auctions = state.get("auctions", [])
 
-    print()
-    print("===== PLÁN AUKCÍ - DRY RUN =====")
-
     if not isinstance(auctions, list):
-        print("Aukce nejsou ve formátu seznamu.")
-        return
+        return []
 
-    open_auctions = [
+    return [
         auction
         for auction in auctions
         if isinstance(auction, dict)
@@ -160,32 +114,99 @@ def print_auction_plan(state: dict) -> None:
         and auction.get("status") == "open"
     ]
 
-    if not open_auctions:
+
+def print_round_info(state: dict) -> None:
+    round_number = state.get("round")
+    server_time = state.get("serverTime")
+    deadlines = state.get("deadlines", [])
+
+    print()
+    print("===== ČAS KOLA =====")
+    print(f"Aktuální kolo: {round_number}")
+    print(f"Serverový čas: {server_time}")
+    print(f"Serverový čas čitelně: {format_time(server_time)}")
+
+    if (
+        isinstance(round_number, int)
+        and isinstance(deadlines, list)
+        and 0 <= round_number < len(deadlines)
+    ):
+        deadline = deadlines[round_number]
+
+        print(f"Uzávěrka kola: {deadline}")
+        print(f"Uzávěrka kola čitelně: {format_time(deadline)}")
+
+        if isinstance(server_time, (int, float)):
+            seconds_left = max(0, (deadline - server_time) / 1000)
+
+            print(f"Zbývá sekund: {seconds_left:.0f}")
+            print(f"Zbývá minut: {seconds_left / 60:.1f}")
+
+            if seconds_left <= 60:
+                print("REŽIM: poslední minuta před uzávěrkou kola.")
+            else:
+                print("REŽIM: nejsme v poslední minutě před uzávěrkou kola.")
+    else:
+        print("Uzávěrku aktuálního kola se nepodařilo určit.")
+
+
+def print_auction_plan(state: dict) -> None:
+    server_time = state.get("serverTime")
+    auctions = current_auction_plan(state)
+
+    print()
+    print("===== PLÁN AUKCÍ - DRY RUN =====")
+
+    if not auctions:
         print("V aktuálním kole nejsou otevřené aukce.")
         return
 
-    for auction in open_auctions:
+    for auction in auctions:
         auction_id = auction.get("id")
+        tier = auction.get("tier")
         current_bid = auction.get("bid")
         minimum_bid = auction.get("minBid")
         bidder = auction.get("bidder")
         closes_at = auction.get("closesAt")
+        hard_close = auction.get("hardClose")
+
+        max_bid = MAX_BID_BY_TIER.get(tier)
 
         print()
         print(f"Aukce: {auction_id}")
         print(f"  Název: {auction.get('name')}")
+        print(f"  Tier: {tier}")
         print(f"  Aktuální nabídka: {current_bid}")
         print(f"  Minimální další příhoz: {minimum_bid}")
         print(f"  Aktuální vedoucí: {bidder}")
         print(f"  Uzavírá se: {format_time(closes_at)}")
+        print(f"  Tvrdá uzávěrka: {format_time(hard_close)}")
+        print(f"  Můj maximální limit: {max_bid}")
 
-        if isinstance(minimum_bid, int):
+        if isinstance(server_time, (int, float)) and isinstance(
+            closes_at,
+            (int, float),
+        ):
+            seconds_to_close = max(0, (closes_at - server_time) / 1000)
+            print(f"  Do uzavření aukce zbývá: {seconds_to_close:.0f} sekund")
+
+        if max_bid is None:
+            print("  ROZHODNUTÍ: tier nemá nastavený limit.")
+            continue
+
+        if not isinstance(minimum_bid, int):
+            print("  ROZHODNUTÍ: nelze určit minimální příhoz.")
+            continue
+
+        if minimum_bid <= max_bid:
             print(
-                f"  DRY RUN: hypotetický příhoz by byl "
-                f"{minimum_bid} zl."
+                f"  ROZHODNUTÍ: hypoteticky přihodit {minimum_bid} zl."
             )
         else:
-            print("  DRY RUN: nelze určit částku.")
+            print(
+                "  ROZHODNUTÍ: nepřihazovat, "
+                f"minimum {minimum_bid} > limit {max_bid}."
+            )
 
 
 def main() -> None:
