@@ -52,6 +52,33 @@ def post_json(path: str, payload: dict) -> dict:
         raise
 
 
+def remove_sensitive_data(value):
+    if isinstance(value, dict):
+        sanitized = {}
+
+        for key, item in value.items():
+            key_lower = str(key).lower()
+
+            if key_lower in {
+                "token",
+                "key",
+                "secret",
+                "password",
+                "personalkey",
+                "personaltoken",
+            }:
+                sanitized[key] = "<REDACTED>"
+            else:
+                sanitized[key] = remove_sensitive_data(item)
+
+        return sanitized
+
+    if isinstance(value, list):
+        return [remove_sensitive_data(item) for item in value]
+
+    return value
+
+
 def main() -> None:
     print(f"Testing room: {ROOM_CODE}")
 
@@ -66,17 +93,19 @@ def main() -> None:
     if not isinstance(response, dict):
         raise RuntimeError("Odpověď serveru není JSON objekt.")
 
-    print("Načtení stavu proběhlo.")
+    sanitized_response = remove_sensitive_data(response)
 
-    interesting = {
-        "round": response.get("round"),
-        "serverTime": response.get("serverTime"),
-        "deadlines": response.get("deadlines"),
-        "auctions": response.get("auctions"),
-        "me": response.get("me"),
-    }
+    print("Top-level keys:")
+    print(", ".join(sorted(response.keys())))
 
-    print(json.dumps(interesting, ensure_ascii=False, indent=2))
+    print("Skutečná odpověď serveru:")
+    print(
+        json.dumps(
+            sanitized_response,
+            ensure_ascii=False,
+            indent=2,
+        )[:20000]
+    )
 
 
 if __name__ == "__main__":
