@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -11,20 +10,9 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
 
-# True = pouze vypíše plán.
-# False = může odeslat skutečný příhoz.
-DRY_RUN = False
-
-MAX_BID_BY_TIER = {
-    0: 60,
-    1: 120,
-    2: 200,
-}
-
-# Pokud je True, agent z bezpečnostních důvodů automaticky
-# neodešle příhoz, pokud aukce zavírá za více než tuto dobu.
-# Pro jednorázový test nastavujeme None.
-TEST_ONLY_AUCTION_ID = "a19-5"
+PENDING_REQUEST_ID = os.environ["PENDING_REQUEST_ID"]
+PENDING_AUCTION_ID = os.environ["PENDING_AUCTION_ID"]
+PENDING_AMOUNT = int(os.environ["PENDING_AMOUNT"])
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -37,7 +25,7 @@ def post_json(path: str, payload: dict) -> dict:
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "zlodeji-agent-test/1.0",
+            "User-Agent": "zlodeji-agent-recovery/1.0",
         },
         method="POST",
     )
@@ -50,10 +38,10 @@ def post_json(path: str, payload: dict) -> dict:
 
             try:
                 return json.loads(raw)
-            except json.JSONDecodeError as error:
+            except json.JSONDecodeError:
                 print("Server nevrátil platný JSON.", file=sys.stderr)
                 print(raw[:4000], file=sys.stderr)
-                raise error
+                raise
 
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
@@ -77,186 +65,86 @@ def get_state() -> dict:
         },
     )
 
-    if not isinstance(response, dict):
-        raise RuntimeError("Odpověď serveru není JSON objekt.")
-
     state = response.get("state")
 
     if not isinstance(state, dict):
-        raise RuntimeError(
-            "Odpověď neobsahuje objekt state. "
-            f"Obdržené klíče: {sorted(response.keys())}"
-        )
+        raise RuntimeError("Odpověď neobsahuje objekt state.")
 
     return state
 
 
-def format_time(timestamp):
-    if not isinstance(timestamp, (int, float)):
-        return "neuvedeno"
-
-    return datetime.fromtimestamp(
-        timestamp / 1000,
-        tz=timezone.utc,
-    ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-
-
-def current_open_auctions(state: dict) -> list[dict]:
-    round_number = state.get("round")
+def find_pending_auction(state: dict) -> dict | None:
     auctions = state.get("auctions", [])
 
-    if not isinstance(auctions, list):
-        return []
-
-    return [
-        auction
-        for auction in auctions
-        if isinstance(auction, dict)
-        and auction.get("round") == round_number
-        and auction.get("status") == "open"
-    ]
-
-
-def choose_bid(state: dict) -> dict | None:
-    auctions = current_open_auctions(state)
-
     for auction in auctions:
-        auction_id = auction.get("id")
-
         if (
-            TEST_ONLY_AUCTION_ID is not None
-            and auction_id != TEST_ONLY_AUCTION_ID
+            isinstance(auction, dict)
+            and auction.get("id") == PENDING_AUCTION_ID
         ):
-            continue
-
-        tier = auction.get("tier")
-        minimum_bid = auction.get("minBid")
-        bidder = auction.get("bidder")
-
-        max_bid = MAX_BID_BY_TIER.get(tier)
-
-        if max_bid is None:
-            print(f"Aukce {auction_id}: tier nemá nastavený limit.")
-            continue
-
-        if not isinstance(minimum_bid, int):
-            print(f"Aukce {auction_id}: chybí platný minBid.")
-            continue
-
-        if bidder is None:
-            raise RuntimeError(
-                f"Aukce {auction_id} nemá bidder. "
-                "Před ostrým příhozem ověř payload ve webu."
-            )
-
-        if minimum_bid > max_bid:
-            print(
-                f"Aukce {auction_id}: nepřihazovat, "
-                f"{minimum_bid} > limit {max_bid}."
-            )
-            continue
-
-        return {
-            "id": auction_id,
-            "amount": minimum_bid,
-            "tier": tier,
-            "current_bid": auction.get("bid"),
-            "bidder": bidder,
-            "max_bid": max_bid,
-        }
+            return auction
 
     return None
 
 
-def send_bid(auction_id: str, amount: int) -> dict:
+def main() -> None:
+    print("=== PENDING RECOVERY ===")
+    print(f"Room: {ROOM_CODE}")
+    print(f"Request ID: {PENDING_REQUEST_ID}")
+    print(f"Aukce: {PENDING_AUCTION_ID}")
+    print(f"Původní částka: {PENDING_AMOUNT}")
+
+    state = get_state()
+
+    round_number = state.get("round")
+    auction = find_pending_auction(state)
+
+    if auction is None:
+        raise RuntimeError(
+            f"Aukce {PENDING_AUCTION_ID} nebyla nalezena ve stavu."
+        )
+
+    print()
+    print("=== AKTUÁLNÍ STAV AUKCE ===")
+    print(f"Status: {auction.get('status')}")
+    print(f"Bid: {auction.get('bid')}")
+    print(f"Bidder: {auction.get('bidder')}")
+    print(f"ClosesAt: {auction.get('closesAt')}")
+    print(f"HardClose: {auction.get('hardClose')}")
+    print(f"Aktuální kolo: {round_number}")
+
+    action = {
+        "type": "auction-bid",
+        "id": PENDING_AUCTION_ID,
+        "amount": PENDING_AMOUNT,
+        "round": round_number,
+    }
+
     payload = {
+        "mode": "online",
         "code": ROOM_CODE,
         "token": TOKEN,
-        "action": {
-            "type": "auction-bid",
-            "id": auction_id,
-            "amount": amount,
-        },
+        "requestId": PENDING_REQUEST_ID,
+        "action": action,
+        "round": round_number,
     }
 
     print()
-    print("===== ODESÍLÁNÍ PŘÍHOZU =====")
-    print(f"Aukce: {auction_id}")
-    print(f"Částka: {amount}")
-    print("Akce: auction-bid")
+    print("=== ODESÍLÁNÍ RECOVERY REQUESTU ===")
+    print("Endpoint: /api/entry")
+    print("Action type: auction-bid")
+    print(f"Action ID: {PENDING_AUCTION_ID}")
+    print(f"Action amount: {PENDING_AMOUNT}")
+    print(f"Round: {round_number}")
 
-    return post_json("/api/act", payload)
-
-
-def verify_bid(state: dict, auction_id: str, amount: int) -> None:
-    auctions = state.get("auctions", [])
-
-    auction = next(
-        (
-            item
-            for item in auctions
-            if isinstance(item, dict)
-            and item.get("id") == auction_id
-        ),
-        None,
-    )
+    result = post_json("/api/entry", payload)
 
     print()
-    print("===== OVĚŘENÍ PŘÍHOZU =====")
-
-    if auction is None:
-        print("Aukce po odeslání nebyla ve stavu nalezena.")
-        return
-
-    print(f"Stav aukce: {auction.get('status')}")
-    print(f"Aktuální nabídka po akci: {auction.get('bid')}")
-    print(f"Vedoucí po akci: {auction.get('bidder')}")
-    print(f"Odeslaná částka: {amount}")
-
-
-def main() -> None:
-    print(f"Testing room: {ROOM_CODE}")
-    print(f"DRY_RUN={DRY_RUN}")
-    print(f"TEST_ONLY_AUCTION_ID={TEST_ONLY_AUCTION_ID}")
-
-    state_before = get_state()
-    selected_bid = choose_bid(state_before)
-
-    if selected_bid is None:
-        print()
-        print("Nebyla nalezena aukce splňující podmínky.")
-        return
-
-    print()
-    print("===== VYBRANÝ PŘÍHOZ =====")
-    print(f"Aukce: {selected_bid['id']}")
-    print(f"Tier: {selected_bid['tier']}")
-    print(f"Aktuální nabídka: {selected_bid['current_bid']}")
-    print(f"Minimální příhoz: {selected_bid['amount']}")
-    print(f"Maximální limit: {selected_bid['max_bid']}")
-    print(f"Současný vedoucí: {selected_bid['bidder']}")
-
-    if DRY_RUN:
-        print()
-        print("DRY_RUN=True – příhoz nebyl odeslán.")
-        return
-
-    result = send_bid(
-        auction_id=selected_bid["id"],
-        amount=selected_bid["amount"],
-    )
-
-    print()
-    print("Odpověď akce:")
+    print("=== ODPOVĚĎ SERVERU ===")
     print(json.dumps(result, ensure_ascii=False, indent=2)[:4000])
 
-    state_after = get_state()
-
-    verify_bid(
-        state=state_after,
-        auction_id=selected_bid["id"],
-        amount=selected_bid["amount"],
-    )
+    print()
+    print("Recovery request byl odeslán.")
+    print("Neodstraňuj zatím income-pending, dokud neověříme výsledek.")
 
 
 if __name__ == "__main__":
