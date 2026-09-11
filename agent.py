@@ -12,7 +12,7 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
 
-DRY_RUN = True
+DRY_RUN = False
 
 MAX_BID_BY_TIER = {
     0: 60,
@@ -33,7 +33,7 @@ def post_json(path: str, payload: dict) -> dict:
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "zlodeji-agent-test/1.0",
+            "User-Agent": "zlodeji-agent/1.0",
         },
         method="POST",
     )
@@ -140,7 +140,7 @@ def choose_candidate(state: dict) -> dict | None:
         if not isinstance(minimum_bid, int):
             continue
 
-        if not isinstance(max_bid, int):
+        if max_bid is None:
             continue
 
         if minimum_bid > max_bid:
@@ -170,41 +170,56 @@ def choose_candidate(state: dict) -> dict | None:
     }
 
 
-def print_candidate(state: dict, candidate: dict | None) -> None:
-    print()
-    print("===== KANDIDÁT PRO PŘÍHOZ =====")
-
-    if candidate is None:
-        print("Aktuálně není žádná vhodná aukce.")
-        return
-
+def send_bid(state: dict, auction: dict) -> dict:
     request_id = str(uuid.uuid4())
 
     payload = {
         "code": ROOM_CODE,
-        "token": "<SECRET>",
+        "token": TOKEN,
         "requestId": request_id,
         "action": {
             "type": "auction-bid",
-            "id": candidate["id"],
-            "amount": candidate["plannedBid"],
+            "id": auction["id"],
+            "amount": auction["plannedBid"],
             "round": state["round"],
         },
     }
 
-    print(f"Aukce: {candidate['id']}")
-    print(f"Název: {candidate.get('name')}")
-    print(f"Tier: {candidate.get('tier')}")
-    print(f"Status: {candidate.get('status')}")
-    print(f"Současný bid: {candidate.get('bid')}")
-    print(f"Současný bidder: {candidate.get('bidder')}")
-    print(f"Plánovaný příhoz: {candidate['plannedBid']}")
-    print(f"Maximální limit: {candidate['maxBid']}")
-    print(f"Uzávěrka: {format_time(candidate.get('closesAt'))}")
+    print()
+    print("===== ODESÍLÁNÍ PŘÍHOZU =====")
+    print(f"Aukce: {auction['id']}")
+    print(f"Částka: {auction['plannedBid']}")
+    print(f"Request ID: {request_id}")
+    print("Endpoint: /api/action")
+
+    return post_json("/api/action", payload)
+
+
+def verify_bid(auction_id: str, amount: int) -> None:
+    state = get_state()
+    auctions = state.get("auctions", [])
+
+    auction = next(
+        (
+            item
+            for item in auctions
+            if isinstance(item, dict)
+            and item.get("id") == auction_id
+        ),
+        None,
+    )
 
     print()
-    print("Payload pro /api/action:")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print("===== OVĚŘENÍ PŘÍHOZU =====")
+
+    if auction is None:
+        print("Aukce nebyla ve stavu nalezena.")
+        return
+
+    print(f"Status: {auction.get('status')}")
+    print(f"Bid: {auction.get('bid')}")
+    print(f"Bidder: {auction.get('bidder')}")
+    print(f"Odeslaná částka: {amount}")
 
 
 def main() -> None:
@@ -215,10 +230,37 @@ def main() -> None:
     state = get_state()
     candidate = choose_candidate(state)
 
-    print_candidate(state, candidate)
+    if candidate is None:
+        print()
+        print("Aktuálně není žádná vhodná aukce.")
+        print("Nebyl odeslán žádný zápisový request.")
+        return
 
     print()
-    print("Zatím nebyl odeslán žádný zápisový request.")
+    print("===== KANDIDÁT PRO PŘÍHOZ =====")
+    print(f"Aukce: {candidate['id']}")
+    print(f"Název: {candidate.get('name')}")
+    print(f"Tier: {candidate.get('tier')}")
+    print(f"Aktuální bid: {candidate.get('bid')}")
+    print(f"Vedoucí: {candidate.get('bidder')}")
+    print(f"Plánovaný příhoz: {candidate['plannedBid']}")
+    print(f"Limit: {candidate['maxBid']}")
+    print(f"Uzávěrka: {format_time(candidate.get('closesAt'))}")
+
+    if DRY_RUN:
+        print("DRY_RUN=True – příhoz nebyl odeslán.")
+        return
+
+    result = send_bid(state, candidate)
+
+    print()
+    print("===== ODPOVĚĎ SERVERU =====")
+    print(json.dumps(result, ensure_ascii=False, indent=2)[:4000])
+
+    verify_bid(
+        auction_id=candidate["id"],
+        amount=candidate["plannedBid"],
+    )
 
 
 if __name__ == "__main__":
