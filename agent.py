@@ -12,6 +12,8 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
 
+DRY_RUN = True
+
 MAX_BID_BY_TIER = {
     0: 60,
     1: 120,
@@ -19,7 +21,6 @@ MAX_BID_BY_TIER = {
 }
 
 TARGET_AUCTION_ID = os.environ.get("TARGET_AUCTION_ID", "")
-DRY_RUN = True
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -32,7 +33,7 @@ def post_json(path: str, payload: dict) -> dict:
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "zlodeji-agent-readonly/1.0",
+            "User-Agent": "zlodeji-agent-test/1.0",
         },
         method="POST",
     )
@@ -40,13 +41,20 @@ def post_json(path: str, payload: dict) -> dict:
     try:
         with urlopen(request, timeout=20) as response:
             raw = response.read().decode("utf-8")
+
             print(f"HTTP {response.status} {path}")
-            return json.loads(raw)
+
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as error:
+                print("Server nevrátil platný JSON.", file=sys.stderr)
+                print(raw[:4000], file=sys.stderr)
+                raise error
 
     except HTTPError as error:
-        response_body = error.read().decode("utf-8", errors="replace")
+        body = error.read().decode("utf-8", errors="replace")
         print(f"HTTP {error.code} {path}", file=sys.stderr)
-        print(response_body[:4000], file=sys.stderr)
+        print(body[:4000], file=sys.stderr)
         raise
 
     except URLError as error:
@@ -81,11 +89,23 @@ def format_time(timestamp):
     ).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def choose_auction(state: dict) -> dict | None:
+def get_me(state: dict) -> dict:
+    me = state.get("me")
+
+    if not isinstance(me, dict):
+        raise RuntimeError("Stav neobsahuje objekt me.")
+
+    return me
+
+
+def get_open_auctions(state: dict) -> list[dict]:
     round_number = state.get("round")
     auctions = state.get("auctions", [])
 
-    candidates = [
+    if not isinstance(auctions, list):
+        return []
+
+    return [
         auction
         for auction in auctions
         if isinstance(auction, dict)
@@ -93,81 +113,112 @@ def choose_auction(state: dict) -> dict | None:
         and auction.get("status") == "open"
     ]
 
-    if TARGET_AUCTION_ID:
-        candidates = [
-            auction
-            for auction in candidates
-            if auction.get("id") == TARGET_AUCTION_ID
-        ]
 
-    candidates.sort(
-        key=lambda auction: auction.get("closesAt", float("inf"))
-    )
+def choose_candidate(state: dict) -> dict | None:
+    me = get_me(state)
+    my_id = me.get("id")
+    available_gold = me.get("availableGold")
 
-    for auction in candidates:
+    if not isinstance(available_gold, (int, float)):
+        available_gold = me.get("gold", 0)
+
+    candidates = []
+
+    for auction in get_open_auctions(state):
+        auction_id = auction.get("id")
+        bidder = auction.get("bidder")
         tier = auction.get("tier")
         minimum_bid = auction.get("minBid")
         max_bid = MAX_BID_BY_TIER.get(tier)
 
-        if (
-            isinstance(minimum_bid, int)
-            and isinstance(max_bid, int)
-            and minimum_bid <= max_bid
-        ):
-            return auction
+        if TARGET_AUCTION_ID and auction_id != TARGET_AUCTION_ID:
+            continue
 
-    return None
+        if bidder == my_id:
+            continue
+
+        if not isinstance(minimum_bid, int):
+            continue
+
+        if not isinstance(max_bid, int):
+            continue
+
+        if minimum_bid > max_bid:
+            continue
+
+        if minimum_bid > available_gold:
+            continue
+
+        candidates.append(auction)
+
+    candidates.sort(
+        key=lambda auction: auction.get(
+            "closesAt",
+            float("inf"),
+        )
+    )
+
+    if not candidates:
+        return None
+
+    selected = candidates[0]
+
+    return {
+        **selected,
+        "plannedBid": selected["minBid"],
+        "maxBid": MAX_BID_BY_TIER[selected["tier"]],
+    }
+
+
+def print_candidate(state: dict, candidate: dict | None) -> None:
+    print()
+    print("===== KANDIDÁT PRO PŘÍHOZ =====")
+
+    if candidate is None:
+        print("Aktuálně není žádná vhodná aukce.")
+        return
+
+    request_id = str(uuid.uuid4())
+
+    payload = {
+        "code": ROOM_CODE,
+        "token": "<SECRET>",
+        "requestId": request_id,
+        "action": {
+            "type": "auction-bid",
+            "id": candidate["id"],
+            "amount": candidate["plannedBid"],
+            "round": state["round"],
+        },
+    }
+
+    print(f"Aukce: {candidate['id']}")
+    print(f"Název: {candidate.get('name')}")
+    print(f"Tier: {candidate.get('tier')}")
+    print(f"Status: {candidate.get('status')}")
+    print(f"Současný bid: {candidate.get('bid')}")
+    print(f"Současný bidder: {candidate.get('bidder')}")
+    print(f"Plánovaný příhoz: {candidate['plannedBid']}")
+    print(f"Maximální limit: {candidate['maxBid']}")
+    print(f"Uzávěrka: {format_time(candidate.get('closesAt'))}")
+
+    print()
+    print("Payload pro /api/action:")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
     print(f"Room: {ROOM_CODE}")
     print(f"DRY_RUN: {DRY_RUN}")
+    print(f"TARGET_AUCTION_ID: {TARGET_AUCTION_ID or 'všechny'}")
 
     state = get_state()
-    auction = choose_auction(state)
+    candidate = choose_candidate(state)
 
-    if auction is None:
-        print("Nebyla nalezena vhodná otevřená aukce.")
-        return
-
-    round_number = state["round"]
-    request_id = str(uuid.uuid4())
-
-    action = {
-        "type": "auction-bid",
-        "id": auction["id"],
-        "amount": auction["minBid"],
-        "round": round_number,
-    }
-
-    candidate_payload = {
-        "mode": "online",
-        "code": ROOM_CODE,
-        "token": "<SECRET>",
-        "requestId": request_id,
-        "action": action,
-        "round": round_number,
-    }
+    print_candidate(state, candidate)
 
     print()
-    print("===== VYBRANÁ AUKCE =====")
-    print(f"ID: {auction.get('id')}")
-    print(f"Název: {auction.get('name')}")
-    print(f"Tier: {auction.get('tier')}")
-    print(f"Status: {auction.get('status')}")
-    print(f"Aktuální nabídka: {auction.get('bid')}")
-    print(f"Minimální příhoz: {auction.get('minBid')}")
-    print(f"Vedoucí: {auction.get('bidder')}")
-    print(f"Uzávěrka: {format_time(auction.get('closesAt'))}")
-    print(f"Volné zlato: {state.get('me', {}).get('availableGold')}")
-    print(f"Rezervované zlato: {state.get('me', {}).get('auctionHeld')}")
-
-    print()
-    print("===== KANDIDÁTNÍ PAYLOAD =====")
-    print(json.dumps(candidate_payload, ensure_ascii=False, indent=2))
-
-    print()
-    print("Žádný zápisový request nebyl odeslán.")
+    print("Zatím nebyl odeslán žádný zápisový request.")
 
 
 if __name__ == "__main__":
