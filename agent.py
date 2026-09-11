@@ -15,8 +15,8 @@ TOKEN = os.environ["TOKEN"]
 # Jednorázový zápisový test.
 DRY_RUN = False
 
-TARGET_AUCTION_ID: "a20-0"
-TEST_BID_AMOUNT: "20"
+TARGET_AUCTION_ID = os.environ["TARGET_AUCTION_ID"]
+TEST_BID_AMOUNT = int(os.environ["TEST_BID_AMOUNT"])
 
 
 def post_json(path: str, payload: dict) -> dict:
