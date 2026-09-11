@@ -1,13 +1,19 @@
-name: Zlodeji agent - single auction write test
+name: Zlodeji agent - auction bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "7,52 * * * *"
 
 permissions:
   contents: read
 
+concurrency:
+  group: zlodeji-auction-bot
+  cancel-in-progress: true
+
 jobs:
-  write-test:
+  auction-bot:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,10 +25,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run single auction write test
+      - name: Run auction check
         env:
           ROOM_CODE: ${{ secrets.ROOM_CODE }}
           TOKEN: ${{ secrets.TOKEN }}
-          TARGET_AUCTION_ID: "a20-0"
-          TEST_BID_AMOUNT: "43"
+          TARGET_AUCTION_ID: ""
         run: python agent.py
