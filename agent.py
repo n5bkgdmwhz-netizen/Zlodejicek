@@ -52,36 +52,7 @@ def post_json(path: str, payload: dict) -> dict:
         raise
 
 
-def remove_sensitive_data(value):
-    if isinstance(value, dict):
-        sanitized = {}
-
-        for key, item in value.items():
-            key_lower = str(key).lower()
-
-            if key_lower in {
-                "token",
-                "key",
-                "secret",
-                "password",
-                "personalkey",
-                "personaltoken",
-            }:
-                sanitized[key] = "<REDACTED>"
-            else:
-                sanitized[key] = remove_sensitive_data(item)
-
-        return sanitized
-
-    if isinstance(value, list):
-        return [remove_sensitive_data(item) for item in value]
-
-    return value
-
-
-def main() -> None:
-    print(f"Testing room: {ROOM_CODE}")
-
+def get_state() -> dict:
     response = post_json(
         "/api/state",
         {
@@ -93,19 +64,90 @@ def main() -> None:
     if not isinstance(response, dict):
         raise RuntimeError("Odpověď serveru není JSON objekt.")
 
-    sanitized_response = remove_sensitive_data(response)
+    state = response.get("state")
 
-    print("Top-level keys:")
-    print(", ".join(sorted(response.keys())))
+    if not isinstance(state, dict):
+        raise RuntimeError(
+            "Odpověď neobsahuje objekt state. "
+            f"Obdržené klíče: {sorted(response.keys())}"
+        )
 
-    print("Skutečná odpověď serveru:")
-    print(
-        json.dumps(
-            sanitized_response,
-            ensure_ascii=False,
-            indent=2,
-        )[:20000]
-    )
+    return state
+
+
+def format_timestamp(timestamp):
+    if not isinstance(timestamp, (int, float)):
+        return "neuvedeno"
+
+    return str(timestamp)
+
+
+def print_summary(state: dict) -> None:
+    round_number = state.get("round")
+    server_time = state.get("serverTime")
+    deadlines = state.get("deadlines")
+    auctions = state.get("auctions", [])
+
+    print()
+    print("===== STAV HRY =====")
+    print(f"Kolo: {round_number}")
+    print(f"Server time: {server_time}")
+    print(f"Počet deadline hodnot: {len(deadlines) if isinstance(deadlines, list) else 0}")
+    print(f"Počet aukcí: {len(auctions) if isinstance(auctions, list) else 0}")
+
+    print()
+    print("===== AKTUÁLNÍ AUKCE =====")
+
+    if not isinstance(auctions, list):
+        print("Aukce nejsou ve formátu seznamu.")
+        return
+
+    current_auctions = [
+        auction
+        for auction in auctions
+        if isinstance(auction, dict)
+        and auction.get("round") == round_number
+    ]
+
+    if not current_auctions:
+        print("Pro aktuální kolo nebyly nalezeny žádné aukce.")
+        return
+
+    for auction in current_auctions:
+        print(
+            " | ".join(
+                [
+                    f"ID={auction.get('id')}",
+                    f"tier={auction.get('tier')}",
+                    f"name={auction.get('name')}",
+                    f"status={auction.get('status')}",
+                    f"bid={auction.get('bid')}",
+                    f"bidder={auction.get('bidder')}",
+                    f"minBid={auction.get('minBid')}",
+                    f"closesAt={format_timestamp(auction.get('closesAt'))}",
+                    f"hardClose={format_timestamp(auction.get('hardClose'))}",
+                ]
+            )
+        )
+
+    print()
+    print("===== DEADLINY =====")
+
+    if isinstance(deadlines, list):
+        for index, deadline in enumerate(deadlines):
+            print(f"{index}: {deadline}")
+    else:
+        print("Deadliny nejsou ve formátu seznamu.")
+
+
+def main() -> None:
+    print(f"Testing room: {ROOM_CODE}")
+
+    state = get_state()
+    print_summary(state)
+
+    print()
+    print("Read-only test dokončen. Nebyla odeslána žádná herní akce.")
 
 
 if __name__ == "__main__":
