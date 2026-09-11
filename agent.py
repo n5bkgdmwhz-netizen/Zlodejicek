@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -9,6 +10,10 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
+
+# Pouze diagnostická hodnota.
+# Agent zatím nic neposílá.
+DRY_RUN = True
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -75,79 +80,125 @@ def get_state() -> dict:
     return state
 
 
-def format_timestamp(timestamp):
+def format_time(timestamp):
     if not isinstance(timestamp, (int, float)):
         return "neuvedeno"
 
-    return str(timestamp)
+    return datetime.fromtimestamp(
+        timestamp / 1000,
+        tz=timezone.utc,
+    ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def print_summary(state: dict) -> None:
+def get_current_deadline(state: dict):
+    deadlines = state.get("deadlines")
+    round_number = state.get("round")
+
+    if not isinstance(deadlines, list):
+        return None
+
+    if not isinstance(round_number, int):
+        return None
+
+    deadline_index = round_number
+
+    if deadline_index >= len(deadlines):
+        return None
+
+    deadline = deadlines[deadline_index]
+
+    if not isinstance(deadline, (int, float)):
+        return None
+
+    return deadline
+
+
+def print_round_info(state: dict) -> None:
     round_number = state.get("round")
     server_time = state.get("serverTime")
-    deadlines = state.get("deadlines")
+    deadline = get_current_deadline(state)
+
+    print()
+    print("===== ČAS KOLA =====")
+    print(f"Aktuální kolo: {round_number}")
+    print(f"Serverový čas: {server_time}")
+    print(f"Serverový čas čitelně: {format_time(server_time)}")
+    print(f"Uzávěrka: {deadline}")
+    print(f"Uzávěrka čitelně: {format_time(deadline)}")
+
+    if isinstance(server_time, (int, float)) and isinstance(
+        deadline,
+        (int, float),
+    ):
+        seconds_left = max(0, (deadline - server_time) / 1000)
+
+        print(f"Zbývá sekund: {seconds_left:.0f}")
+        print(f"Zbývá minut: {seconds_left / 60:.1f}")
+
+        if seconds_left <= 60:
+            print("REŽIM: jsme v poslední minutě před uzávěrkou.")
+        else:
+            print("REŽIM: ještě nejsme v poslední minutě.")
+
+
+def print_auction_plan(state: dict) -> None:
+    round_number = state.get("round")
     auctions = state.get("auctions", [])
 
     print()
-    print("===== STAV HRY =====")
-    print(f"Kolo: {round_number}")
-    print(f"Server time: {server_time}")
-    print(f"Počet deadline hodnot: {len(deadlines) if isinstance(deadlines, list) else 0}")
-    print(f"Počet aukcí: {len(auctions) if isinstance(auctions, list) else 0}")
-
-    print()
-    print("===== AKTUÁLNÍ AUKCE =====")
+    print("===== PLÁN AUKCÍ - DRY RUN =====")
 
     if not isinstance(auctions, list):
         print("Aukce nejsou ve formátu seznamu.")
         return
 
-    current_auctions = [
+    open_auctions = [
         auction
         for auction in auctions
         if isinstance(auction, dict)
         and auction.get("round") == round_number
+        and auction.get("status") == "open"
     ]
 
-    if not current_auctions:
-        print("Pro aktuální kolo nebyly nalezeny žádné aukce.")
+    if not open_auctions:
+        print("V aktuálním kole nejsou otevřené aukce.")
         return
 
-    for auction in current_auctions:
-        print(
-            " | ".join(
-                [
-                    f"ID={auction.get('id')}",
-                    f"tier={auction.get('tier')}",
-                    f"name={auction.get('name')}",
-                    f"status={auction.get('status')}",
-                    f"bid={auction.get('bid')}",
-                    f"bidder={auction.get('bidder')}",
-                    f"minBid={auction.get('minBid')}",
-                    f"closesAt={format_timestamp(auction.get('closesAt'))}",
-                    f"hardClose={format_timestamp(auction.get('hardClose'))}",
-                ]
+    for auction in open_auctions:
+        auction_id = auction.get("id")
+        current_bid = auction.get("bid")
+        minimum_bid = auction.get("minBid")
+        bidder = auction.get("bidder")
+        closes_at = auction.get("closesAt")
+
+        print()
+        print(f"Aukce: {auction_id}")
+        print(f"  Název: {auction.get('name')}")
+        print(f"  Aktuální nabídka: {current_bid}")
+        print(f"  Minimální další příhoz: {minimum_bid}")
+        print(f"  Aktuální vedoucí: {bidder}")
+        print(f"  Uzavírá se: {format_time(closes_at)}")
+
+        if isinstance(minimum_bid, int):
+            print(
+                f"  DRY RUN: hypotetický příhoz by byl "
+                f"{minimum_bid} zl."
             )
-        )
-
-    print()
-    print("===== DEADLINY =====")
-
-    if isinstance(deadlines, list):
-        for index, deadline in enumerate(deadlines):
-            print(f"{index}: {deadline}")
-    else:
-        print("Deadliny nejsou ve formátu seznamu.")
+        else:
+            print("  DRY RUN: nelze určit částku.")
 
 
 def main() -> None:
     print(f"Testing room: {ROOM_CODE}")
 
     state = get_state()
-    print_summary(state)
+
+    print_round_info(state)
+    print_auction_plan(state)
 
     print()
-    print("Read-only test dokončen. Nebyla odeslána žádná herní akce.")
+    print(f"DRY_RUN={DRY_RUN}")
+    print("Nebyla odeslána žádná herní akce.")
 
 
 if __name__ == "__main__":
