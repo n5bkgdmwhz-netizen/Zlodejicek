@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -11,6 +12,11 @@ BASE_URL = "https://zlodejipokladu.pages.dev"
 
 ROOM_CODE = os.environ["ROOM_CODE"]
 TOKEN = os.environ["TOKEN"]
+
+CHECK_INTERVAL_SECONDS = 45
+
+# 5 hodin a 50 minut.
+RUN_DURATION_SECONDS = 5 * 60 * 60 + 50 * 60
 
 MAX_BID_BY_TIER = {
     0: 60,
@@ -39,17 +45,17 @@ def post_json(path: str, payload: dict) -> dict:
     try:
         with urlopen(request, timeout=20) as response:
             raw = response.read().decode("utf-8")
-            print(f"HTTP {response.status} {path}")
+            print(f"HTTP {response.status} {path}", flush=True)
             return json.loads(raw)
 
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        print(f"HTTP {error.code} {path}", file=sys.stderr)
-        print(body[:4000], file=sys.stderr)
+        print(f"HTTP {error.code} {path}", file=sys.stderr, flush=True)
+        print(body[:4000], file=sys.stderr, flush=True)
         raise
 
     except URLError as error:
-        print(f"Chyba připojení: {error}", file=sys.stderr)
+        print(f"Chyba připojení: {error}", file=sys.stderr, flush=True)
         raise
 
 
@@ -155,40 +161,85 @@ def send_bid(state: dict, auction: dict) -> dict:
         },
     }
 
-    print("===== ODESÍLÁNÍ PŘÍHOZU =====")
-    print(f"Aukce: {auction['id']}")
-    print(f"Částka: {auction['plannedBid']}")
-    print(f"Limit: {auction['limit']}")
-    print(f"Uzávěrka: {format_time(auction.get('closesAt'))}")
+    print("===== ODESÍLÁNÍ PŘÍHOZU =====", flush=True)
+    print(f"Aukce: {auction['id']}", flush=True)
+    print(f"Částka: {auction['plannedBid']}", flush=True)
+    print(f"Limit: {auction['limit']}", flush=True)
+    print(
+        f"Uzávěrka: {format_time(auction.get('closesAt'))}",
+        flush=True,
+    )
 
     return post_json("/api/action", payload)
 
 
-def main() -> None:
-    print(f"Room: {ROOM_CODE}")
-    print("Jednorázová kontrola aukcí.")
+def process_once() -> None:
+    print(
+        f"===== KONTROLA {datetime.now(timezone.utc).isoformat()} =====",
+        flush=True,
+    )
 
     state = get_state()
     candidate = choose_candidate(state)
 
     if candidate is None:
-        print("Žádná vhodná aukce.")
+        print(
+            "Žádná vhodná aukce.",
+            flush=True,
+        )
         return
 
-    print("Vybraná aukce:")
-    print(f"ID: {candidate['id']}")
-    print(f"Název: {candidate.get('name')}")
-    print(f"Tier: {candidate.get('tier')}")
-    print(f"Bid: {candidate.get('bid')}")
-    print(f"Bidder: {candidate.get('bidder')}")
-    print(f"MinBid: {candidate.get('minBid')}")
-    print(f"Limit: {candidate.get('limit')}")
-    print(f"Uzávěrka: {format_time(candidate.get('closesAt'))}")
+    print(
+        f"Vybraná aukce: {candidate['id']}",
+        flush=True,
+    )
 
     result = send_bid(state, candidate)
 
-    print("Odpověď serveru:")
-    print(json.dumps(result, ensure_ascii=False, indent=2)[:4000])
+    print("Odpověď serveru:", flush=True)
+    print(
+        json.dumps(result, ensure_ascii=False, indent=2)[:4000],
+        flush=True,
+    )
+
+    # Po úspěšném příhozu se další kontrola provede
+    # až po 45 sekundách. Serverový stav se tím znovu ověří.
+    print("Příhoz dokončen.", flush=True)
+
+
+def main() -> None:
+    print(f"Room: {ROOM_CODE}", flush=True)
+    print(
+        f"Kontrola každých {CHECK_INTERVAL_SECONDS} sekund.",
+        flush=True,
+    )
+    print(
+        f"Běh potrvá přibližně {RUN_DURATION_SECONDS // 60} minut.",
+        flush=True,
+    )
+
+    started = time.monotonic()
+    next_run = started
+
+    while time.monotonic() - started < RUN_DURATION_SECONDS:
+        now = time.monotonic()
+
+        if now < next_run:
+            time.sleep(min(next_run - now, 5))
+            continue
+
+        try:
+            process_once()
+        except Exception as error:
+            print(
+                f"Chyba během kontroly: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        next_run += CHECK_INTERVAL_SECONDS
+
+    print("Běh agenta skončil.", flush=True)
 
 
 if __name__ == "__main__":
